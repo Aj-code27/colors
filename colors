@@ -1,0 +1,227 @@
+"""
+color_mix_game.py
+
+A small Tkinter game: each round you are given a target color.
+Pick two colors from the palette and the game will mix them (additive mixing,
+simple average of RGB channels). If your mixed color is close enough to the
+target, you score a point.
+
+Requirements: Python 3 (Tkinter usually included with standard Python installs).
+
+Run:
+    python color_mix_game.py
+"""
+
+import tkinter as tk
+from tkinter import messagebox
+import random
+import math
+
+# Palette of named colors (hex)
+PALETTE = {
+    "Red": "#FF0000",
+    "Green": "#00FF00",
+    "Blue": "#0000FF",
+    "Yellow": "#FFFF00",
+    "Cyan": "#00FFFF",
+    "Magenta": "#FF00FF",
+    "Orange": "#FFA500",
+    "Purple": "#800080",
+    "Brown": "#8B4513",
+    "Pink": "#FFC0CB",
+    "Black": "#000000",
+    "White": "#FFFFFF",
+    "Gray": "#808080",
+}
+
+# Convert hex to (r,g,b) 0..255
+def hex_to_rgb(hexcode: str):
+    hexcode = hexcode.lstrip('#')
+    return tuple(int(hexcode[i:i+2], 16) for i in (0, 2, 4))
+
+# Convert (r,g,b) 0..255 to hex
+def rgb_to_hex(rgb):
+    return '#{:02X}{:02X}{:02X}'.format(*[max(0, min(255, int(x))) for x in rgb])
+
+# Euclidean distance between two RGB triples
+def color_distance(c1, c2):
+    return math.sqrt(sum((a - b) ** 2 for a, b in zip(c1, c2)))
+
+# Mix two colors using additive mixing (average of RGB channels)
+def mix_colors_additive(c1, c2):
+    return tuple((a + b) / 2 for a, b in zip(c1, c2))
+
+class ColorMixGame:
+    def __init__(self, master):
+        self.master = master
+        master.title("Color Mix Game")
+        master.resizable(False, False)
+        self.palette = {name: hex_to_rgb(hexc) for name, hexc in PALETTE.items()}
+        self.round = 0
+        self.score = 0
+        self.tolerance = 60.0  # how close the mix must be (0..~441)
+        self.selected = []  # names of selected colors (max 2)
+
+        # Top frame: target color
+        top = tk.Frame(master, padx=10, pady=10)
+        top.grid(row=0, column=0, sticky="ew")
+        tk.Label(top, text="Target color:", font=("Segoe UI", 12, "bold")).pack(anchor="w")
+        self.target_canvas = tk.Canvas(top, width=200, height=80, bd=2, relief="sunken")
+        self.target_canvas.pack(pady=(4, 8))
+        self.target_label = tk.Label(top, text="", font=("Segoe UI", 10))
+        self.target_label.pack()
+
+        # Middle: palette
+        mid = tk.Frame(master, padx=10, pady=6)
+        mid.grid(row=1, column=0)
+        tk.Label(mid, text="Palette: (click to select 2 colors)", font=("Segoe UI", 11)).grid(row=0, column=0, columnspan=6, sticky="w")
+
+        self.color_buttons = {}
+        row = 1
+        col = 0
+        for i, (name, rgb) in enumerate(self.palette.items()):
+            hexc = rgb_to_hex(rgb)
+            btn = tk.Button(mid, text=name, width=10, relief="raised",
+                            command=lambda n=name: self.on_palette_click(n))
+            btn.grid(row=row, column=col, padx=6, pady=6)
+            # small color swatch on left of label
+            sw = tk.Canvas(btn, width=14, height=14, highlightthickness=0)
+            sw.create_rectangle(0, 0, 14, 14, fill=hexc, outline=hexc)
+            # place canvas inside button
+            sw.place(x=2, y=2)
+            self.color_buttons[name] = btn
+
+            col += 1
+            if col >= 4:
+                col = 0
+                row += 1
+
+        # Right side: selection and result
+        right = tk.Frame(master, padx=10, pady=10)
+        right.grid(row=0, column=1, rowspan=2, sticky="ns")
+        tk.Label(right, text="Your selection:", font=("Segoe UI", 11)).pack(anchor="w")
+        self.sel_frame = tk.Frame(right)
+        self.sel_frame.pack(pady=6)
+        self.sel_label = tk.Label(self.sel_frame, text="(none)", font=("Segoe UI", 10))
+        self.sel_label.pack()
+
+        tk.Label(right, text="Mixed color:", font=("Segoe UI", 11)).pack(anchor="w", pady=(8,0))
+        self.mix_canvas = tk.Canvas(right, width=160, height=80, bd=2, relief="sunken")
+        self.mix_canvas.pack(pady=6)
+        self.mix_label = tk.Label(right, text="", font=("Segoe UI", 10))
+        self.mix_label.pack()
+
+        # Bottom: controls
+        bottom = tk.Frame(master, padx=10, pady=10)
+        bottom.grid(row=2, column=0, columnspan=2, sticky="ew")
+        self.status_label = tk.Label(bottom, text="Score: 0 | Round: 0", font=("Segoe UI", 10, "italic"))
+        self.status_label.pack(side="left")
+
+        ctl_frame = tk.Frame(bottom)
+        ctl_frame.pack(side="right")
+        tk.Button(ctl_frame, text="Mix", command=self.check_mix).pack(side="left", padx=6)
+        tk.Button(ctl_frame, text="Clear selection", command=self.clear_selection).pack(side="left", padx=6)
+        tk.Button(ctl_frame, text="New target", command=self.new_round).pack(side="left", padx=6)
+        tk.Button(ctl_frame, text="How to play", command=self.show_help).pack(side="left", padx=6)
+
+        self.new_round()
+
+    def show_help(self):
+        msg = ("How to play:\n\n"
+               "1. A target color is shown on the left.\n"
+               "2. Click two colors from the palette to select them.\n"
+               "3. Click 'Mix' to mix them (simple additive average of RGB).\n"
+               "4. If your mixed color is close to the target you get a point.\n\n"
+               "You can click 'New target' to skip. Have fun!")
+        messagebox.showinfo("How to play", msg)
+
+    def new_round(self):
+        # Choose a random target color from combinations of palette colors for more solvable targets,
+        # or occasionally totally random color to make it challenging.
+        self.round += 1
+        if random.random() < 0.85:
+            # make target a mix of two random palette colors (so it's solvable)
+            a, b = random.sample(list(self.palette.values()), 2)
+            target_rgb = tuple((x + y) / 2 for x, y in zip(a, b))
+        else:
+            # random color
+            target_rgb = (random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
+
+        self.target_rgb = target_rgb
+        self.target_hex = rgb_to_hex(tuple(int(x) for x in target_rgb))
+        self.target_canvas.delete("all")
+        self.target_canvas.create_rectangle(0, 0, 200, 80, fill=self.target_hex, outline="black")
+        self.target_label.config(text=f"Target hex: {self.target_hex}  (tolerance: {int(self.tolerance)})")
+
+        self.clear_selection(update_status=False)
+        self.update_status()
+
+    def on_palette_click(self, name):
+        if name in self.selected:
+            # deselect
+            self.selected.remove(name)
+            self.color_buttons[name].config(relief="raised")
+        else:
+            if len(self.selected) >= 2:
+                messagebox.showinfo("Selection full", "You already selected two colors. Clear or deselect one first.")
+                return
+            self.selected.append(name)
+            self.color_buttons[name].config(relief="sunken")
+        self.update_selection_display()
+
+    def update_selection_display(self):
+        if not self.selected:
+            self.sel_label.config(text="(none)")
+        else:
+            self.sel_label.config(text=" + ".join(self.selected))
+
+        # update mixed color preview if two selected
+        if len(self.selected) == 2:
+            rgb1 = self.palette[self.selected[0]]
+            rgb2 = self.palette[self.selected[1]]
+            mixed = mix_colors_additive(rgb1, rgb2)
+            hexm = rgb_to_hex(tuple(int(x) for x in mixed))
+            self.mix_canvas.delete("all")
+            self.mix_canvas.create_rectangle(0, 0, 160, 80, fill=hexm, outline="black")
+            self.mix_label.config(text=f"Mixed hex: {hexm}")
+        else:
+            self.mix_canvas.delete("all")
+            self.mix_label.config(text="")
+
+    def clear_selection(self, update_status=True):
+        for name in list(self.selected):
+            if name in self.color_buttons:
+                self.color_buttons[name].config(relief="raised")
+        self.selected = []
+        self.update_selection_display()
+        if update_status:
+            self.update_status()
+
+    def check_mix(self):
+        if len(self.selected) != 2:
+            messagebox.showwarning("Pick two colors", "Please select exactly two colors to mix.")
+            return
+        rgb1 = self.palette[self.selected[0]]
+        rgb2 = self.palette[self.selected[1]]
+        mixed = mix_colors_additive(rgb1, rgb2)
+        dist = color_distance(mixed, self.target_rgb)
+        hexm = rgb_to_hex(tuple(int(x) for x in mixed))
+
+        if dist <= self.tolerance:
+            self.score += 1
+            messagebox.showinfo("Nice!", f"Good match!\nMixed: {hexm}\nDistance: {dist:.1f}\n+1 point")
+            self.new_round()
+        else:
+            messagebox.showinfo("Not quite", f"Mixed: {hexm}\nDistance to target: {dist:.1f}\nTry again or New target.")
+            # keep round number same; clear selection for retry
+            self.clear_selection(update_status=False)
+
+        self.update_status()
+
+    def update_status(self):
+        self.status_label.config(text=f"Score: {self.score} | Round: {self.round}")
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = ColorMixGame(root)
+    root.mainloop()
